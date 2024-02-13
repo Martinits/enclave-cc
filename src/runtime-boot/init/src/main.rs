@@ -1,6 +1,4 @@
 extern crate libc;
-extern crate serde;
-extern crate serde_json;
 
 use libc::syscall;
 
@@ -8,7 +6,7 @@ use nix::mount::MsFlags;
 use std::env;
 use std::error::Error;
 use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 
 use anyhow::Result;
 use std::ffi::CString;
@@ -28,50 +26,46 @@ fn main() -> Result<(), Box<dyn Error>> {
             unsafe { syscall(SYS_MOUNT_FS, root_config_ptr) }
         }
         false => {
-            let rootfs_upper_layer = "/sefs/upper";
-            let rootfs_lower_layer = "/sefs/lower";
+            let rootfs_base = "/eccfs";
             let rootfs_entry = "/";
-
-            let fs_type = String::from("sefs");
-            let source = Path::new(&fs_type);
 
             let mount_path = Path::new("/tmp");
             let flags = MsFlags::empty();
 
             nix::mount::mount(
-                Some(source),
+                Some("sefs"),
                 mount_path,
-                Some(fs_type.as_str()),
+                Some("sefs"),
                 flags,
                 Some("dir=/keys/sefs/lower"),
-            )
-            .unwrap_or_else(|err| {
+            ).unwrap_or_else(|err| {
                 eprintln!("Error mounting keys: {}", err);
             });
 
             // Get the key of FS image
-            let key = {
-                let key_str = load_key(KEY_FILE)?;
-                let mut key: sgx_key_128bit_t = Default::default();
-                parse_str_to_bytes(&key_str, &mut key)?;
-                Some(key)
-            };
+            let key_str = load_key(KEY_FILE)?;
+            let nr_layer = key_str.as_str().split(":").collect::<Vec<_>>().len();
+            let key_str = CString::new(key_str)?;
+
             nix::mount::umount(mount_path)?;
-            let key_ptr = key
-                .as_ref()
-                .map(|key| key as *const sgx_key_128bit_t)
-                .unwrap_or(std::ptr::null());
 
             // Example envs. must end with null
             let env1 = CString::new("TEST=1234").unwrap();
             let envp = [env1.as_ptr(), std::ptr::null()];
+
             // Set rootfs parameters
-            let upper_layer_path = CString::new(rootfs_upper_layer).expect("CString::new failed");
-            let lower_layer_path = CString::new(rootfs_lower_layer).expect("CString::new failed");
+            let lower_path = (0..nr_layer-1).map(
+                |n| format!("{rootfs_base}/{:04}.roimage", n)
+            ).collect::<Vec<_>>().join(":");
+            let upper_layer_path = CString::new(format!("{rootfs_base}/run.rwimage"))?;
+            let lower_layer_path = CString::new(lower_path)?;
+
             let entry_point = CString::new(rootfs_entry).expect("CString::new failed");
             let hostfs_source = CString::new("/tmp").expect("CString::new failed");
+
             let rootfs_config: user_rootfs_config = user_rootfs_config {
                 len: size_of::<user_rootfs_config>(),
+                eccfs_key_str: key_str.as_ptr(),
                 upper_layer_path: upper_layer_path.as_ptr(),
                 lower_layer_path: lower_layer_path.as_ptr(),
                 entry_point: entry_point.as_ptr(),
@@ -79,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 hostfs_target: std::ptr::null(),
                 envp: envp.as_ptr(),
             };
-            unsafe { syscall(SYS_MOUNT_FS, key_ptr, &rootfs_config) }
+            unsafe { syscall(SYS_MOUNT_FS, std::ptr::null() as *const i8, &rootfs_config) }
         }
     };
     if ret < 0 {
@@ -88,15 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[allow(non_camel_case_types)]
-type sgx_key_128bit_t = [u8; 16];
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 #[allow(non_camel_case_types)]
 struct user_rootfs_config {
     // length of the struct
     len: usize,
+    eccfs_key_str: *const i8,
     // UnionFS type rootfs upper layer, read-write layer
     upper_layer_path: *const i8,
     // UnionFS type rootfs lower layer, read-only layer
@@ -116,22 +108,4 @@ fn load_key(key_path: &str) -> Result<String, Box<dyn Error>> {
     let mut key = String::new();
     key_file.read_to_string(&mut key)?;
     Ok(key.trim_end_matches(|c| c == '\r' || c == '\n').to_string())
-}
-
-fn parse_str_to_bytes(arg_str: &str, bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
-    let bytes_str_vec = {
-        let bytes_str_vec: Vec<&str> = arg_str.split('-').collect();
-        if bytes_str_vec.len() != bytes.len() {
-            return Err(Box::new(std::io::Error::new(
-                ErrorKind::InvalidData,
-                "The length or format of Key/MAC string is invalid",
-            )));
-        }
-        bytes_str_vec
-    };
-
-    for (byte_i, byte_str) in bytes_str_vec.iter().enumerate() {
-        bytes[byte_i] = u8::from_str_radix(byte_str, 16)?;
-    }
-    Ok(())
 }

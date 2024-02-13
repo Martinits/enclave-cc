@@ -24,7 +24,7 @@ pub struct ImageService {
 impl ImageService {
     pub fn new(dc: DecryptConfig) -> Self {
         let new_config = ImageConfig {
-            default_snapshot: snapshots::SnapshotType::OcclumUnionfs,
+            default_snapshot: snapshots::SnapshotType::Eccfs,
             security_validate: dc.security_validate.map_or(true, |v| v),
             ..Default::default()
         };
